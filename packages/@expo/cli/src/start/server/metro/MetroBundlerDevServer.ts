@@ -332,7 +332,9 @@ export class MetroBundlerDevServer extends BundlerDevServer {
       const artifactFilename =
         route.page === rscPath
           ? // HACK: Add RSC renderer to the output...
-            convertPathToModuleSpecifier(path.join(outputDir, '.' + rscPath + '.js'))
+            convertPathToModuleSpecifier(
+              path.join(outputDir, '.' + rscPath + serverOutputExtension)
+            )
           : convertPathToModuleSpecifier(
               path.join(
                 outputDir,
@@ -1214,7 +1216,8 @@ export class MetroBundlerDevServer extends BundlerDevServer {
     );
 
     // Save the SSR manifest so we can perform more replacements in the server renderer and with server actions.
-    files.set(`_expo/rsc/${options.platform}/ssr-manifest.js`, {
+    const manifestFilename = `_expo/rsc/${options.platform}/ssr-manifest${this.serverOutputExtension}`;
+    files.set(manifestFilename, {
       targetDomain: 'server',
       contents:
         'module.exports = ' +
@@ -1552,6 +1555,7 @@ export class MetroBundlerDevServer extends BundlerDevServer {
       if (isReactServerComponentsEnabled) {
         this.bindRSCDevModuleInjectionHandler();
         const rscMiddleware = createServerComponentsMiddleware(this.projectRoot, {
+          outputExtension: this.serverOutputExtension,
           instanceMetroOptions: this.instanceMetroOptions,
           rscPath: '/_flight',
           ssrLoadModule: this.ssrLoadModule.bind(this),
@@ -1625,6 +1629,7 @@ export class MetroBundlerDevServer extends BundlerDevServer {
       if (isReactServerComponentsEnabled) {
         this.bindRSCDevModuleInjectionHandler();
         const rscMiddleware = createServerComponentsMiddleware(this.projectRoot, {
+          outputExtension: this.serverOutputExtension,
           instanceMetroOptions: this.instanceMetroOptions,
           rscPath: '/_flight',
           ssrLoadModule: this.ssrLoadModule.bind(this),
