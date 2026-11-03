@@ -8,6 +8,7 @@ import { events } from '2g';
 import type { ExpoConfig } from '@expo/config';
 import { getConfig } from '@expo/config';
 import { getMetroServerRoot, resolveRelativeEntryPoint } from '@expo/config/paths';
+import { getServerOutputExtension } from '@expo/metro-config/build/serializer/exportPath';
 import { getServerRunModuleStatement } from '@expo/metro-config/build/serializer/getServerRunModuleStatement';
 import { serializeServerBundleAsync } from '@expo/metro-config/build/serializer/serializeServerBundle';
 import type { SerialAsset } from '@expo/metro-config/build/serializer/serializerAssets';
@@ -245,8 +246,12 @@ export class MetroBundlerDevServer extends BundlerDevServer {
     const middlewareFilePath = path.isAbsolute(manifest.middleware.file)
       ? manifest.middleware.file
       : path.join(appDir, manifest.middleware.file);
+    const serverOutputExtension = this.serverOutputExtension;
     const artifactFilename = convertPathToModuleSpecifier(
-      path.join(outputDir, path.relative(appDir, middlewareFilePath.replace(/\.[tj]sx?$/, '.js')))
+      path.join(
+        outputDir,
+        path.relative(appDir, middlewareFilePath.replace(/\.[tj]sx?$/, serverOutputExtension))
+      )
     );
     const contents = await this.bundleApiRoute(middlewareFilePath, {
       platform,
@@ -281,6 +286,7 @@ export class MetroBundlerDevServer extends BundlerDevServer {
     platform: string;
   }): Promise<{ files: ExportAssetMap; manifest: RoutesManifest<string> }> {
     const { routerRoot } = this.instanceMetroOptions;
+    const serverOutputExtension = this.serverOutputExtension;
     assert(
       routerRoot != null,
       'The server must be started before calling exportExpoRouterApiRoutesAsync.'
@@ -328,7 +334,10 @@ export class MetroBundlerDevServer extends BundlerDevServer {
           ? // HACK: Add RSC renderer to the output...
             convertPathToModuleSpecifier(path.join(outputDir, '.' + rscPath + '.js'))
           : convertPathToModuleSpecifier(
-              path.join(outputDir, path.relative(appDir, filepath.replace(/\.[tj]sx?$/, '.js')))
+              path.join(
+                outputDir,
+                path.relative(appDir, filepath.replace(/\.[tj]sx?$/, serverOutputExtension))
+              )
             );
       const contents = await this.bundleApiRoute(filepath, {
         platform,
@@ -371,7 +380,7 @@ export class MetroBundlerDevServer extends BundlerDevServer {
     includeSourceMaps?: boolean;
     platform?: string;
   }) {
-    const artifactFilename = '_expo/server/render.js';
+    const artifactFilename = `_expo/server/render${this.serverOutputExtension}`;
     const renderModule = await this.ssrLoadModuleContents(
       require.resolve('@expo/router-server/node/render.js'),
       {
@@ -418,7 +427,9 @@ export class MetroBundlerDevServer extends BundlerDevServer {
     // NOTE(@hassankhan): Should we parallelize loader bundling?
     for (const entry of entryPoints) {
       const pagePath = entry.page.startsWith('/') ? entry.page.slice(1) : entry.page;
-      const artifactFilename = convertPathToModuleSpecifier(path.join(outputDir, pagePath + '.js'));
+      const artifactFilename = convertPathToModuleSpecifier(
+        path.join(outputDir, pagePath + this.serverOutputExtension)
+      );
       const contents = await this.bundleLoader(entry.file, {
         platform,
         entryFilename: artifactFilename,
@@ -818,6 +829,7 @@ export class MetroBundlerDevServer extends BundlerDevServer {
 
   // Set when the server is started.
   private instanceMetroOptions: Partial<ExpoMetroOptions> = {};
+  private serverOutputExtension: '.js' | '.cjs' = '.js';
 
   private ssrLoadModule: SSRLoadModuleFunc = async (
     filePath,
@@ -1332,6 +1344,7 @@ export class MetroBundlerDevServer extends BundlerDevServer {
       );
     }
 
+    this.serverOutputExtension = getServerOutputExtension(config.pkg.type);
     const instanceMetroOptions = {
       chunkingStrategy: getChunkingStrategyFromExpoConfig(exp),
       isExporting: !!options.isExporting,
