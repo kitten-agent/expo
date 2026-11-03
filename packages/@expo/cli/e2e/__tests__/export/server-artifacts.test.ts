@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
-import { executeExpoAsync } from '../../utils/expo';
+import { createExpoServe, executeExpoAsync } from '../../utils/expo';
 import { processFindPrefixedValue } from '../../utils/process';
 import { setupServer } from '../../utils/runtime';
 import { createBackgroundServer } from '../../utils/server';
@@ -11,9 +11,17 @@ import { runExportSideEffects } from './export-side-effects';
 
 runExportSideEffects();
 
-it.each(['pair', 'string', 'captured'])(
-  'exports a custom serializer %s result as server artifacts',
-  async (format) => {
+it.each([
+  ['pair', 'commonjs'],
+  ['string', 'commonjs'],
+  ['captured', 'commonjs'],
+  ['pair', 'module'],
+  ['string', 'module'],
+  ['captured', 'module'],
+])(
+  'exports a custom serializer %s result as server artifacts (%s)',
+  async (format, packageType) => {
+    const extension = packageType === 'module' ? '.cjs' : '.js';
     let projectRoot = getTemporaryPath();
     try {
       await fs.promises.cp(
@@ -27,6 +35,9 @@ it.each(['pair', 'string', 'captured'])(
         path.join(projectRoot, 'node_modules'),
         'junction'
       );
+      const packagePath = path.join(projectRoot, 'package.json');
+      const pkg = JSON.parse(await fs.promises.readFile(packagePath, 'utf8'));
+      await fs.promises.writeFile(packagePath, JSON.stringify({ ...pkg, type: packageType }));
       await fs.promises.appendFile(
         path.join(projectRoot, 'metro.config.cjs'),
         `
@@ -49,7 +60,9 @@ if (${JSON.stringify(format)} === 'captured') {
         env: { NODE_ENV: 'production' },
       });
       const serverRoot = path.join(projectRoot, 'dist/server');
-      const filename = findProjectFiles(serverRoot).find((file) => file.endsWith('hello+api.js'))!;
+      const filename = findProjectFiles(serverRoot).find((file) =>
+        file.endsWith('hello+api' + extension)
+      )!;
       expect(filename).toBeDefined();
       const output = path.join(serverRoot, filename);
       const { GET } = createRequire(__filename)(output);
@@ -82,7 +95,15 @@ if (${JSON.stringify(format)} === 'captured') {
   }
 );
 
-describe.each(['SSR', 'RSC'])('serialized server artifacts: %s', (mode) => {
+describe.each([
+  ['SSR', 'commonjs', 'default'],
+  ['RSC', 'commonjs', 'default'],
+  ['SSR', 'module', 'default'],
+  ['RSC', 'module', 'default'],
+  ['RSC', 'commonjs', 'custom action'],
+  ['RSC', 'module', 'custom action'],
+])('serialized server artifacts: %s (%s, %s)', (mode, packageType, variant) => {
+  const extension = packageType === 'module' ? '.cjs' : '.js';
   let projectRoot = getTemporaryPath();
   const outputDir = path.join(projectRoot, 'dist');
 
@@ -98,6 +119,23 @@ describe.each(['SSR', 'RSC'])('serialized server artifacts: %s', (mode) => {
       path.join(projectRoot, 'node_modules'),
       'junction'
     );
+    const packagePath = path.join(projectRoot, 'package.json');
+    const pkg = JSON.parse(await fs.promises.readFile(packagePath, 'utf8'));
+    await fs.promises.writeFile(packagePath, JSON.stringify({ ...pkg, type: packageType }));
+    if (variant === 'custom action') {
+      await fs.promises.appendFile(
+        path.join(projectRoot, 'metro.config.cjs'),
+        `
+const original = config.serializer.customSerializer;
+config.serializer.customSerializer = async (...args) => {
+  const result = await original(...args);
+  return args[0].endsWith('/actions.ts')
+    ? result.artifacts.find((artifact) => artifact.type === 'js').source
+    : result;
+};
+`
+      );
+    }
     await executeExpoAsync(projectRoot, ['export', '-p', 'web', '--source-maps'], {
       env: { NODE_ENV: 'production', TEST_RSC: mode === 'RSC' ? '1' : '0' },
     });
@@ -123,14 +161,72 @@ describe.each(['SSR', 'RSC'])('serialized server artifacts: %s', (mode) => {
       }),
   });
 
+  if (mode === 'SSR') {
+    const serve = setupServer({
+      name: 'expo serve',
+      prepareDist: async () => [outputDir],
+      createServer: () => createExpoServe({ cwd: projectRoot, env: { NODE_ENV: 'production' } }),
+    });
+
+    it('serves API, middleware, loaders, and JavaScript client scripts with expo serve', async () => {
+      const api = await serve.fetchAsync('/hello');
+      expect(api.status).toBe(200);
+      expect(api.headers.get('x-esm-middleware')).toBe('true');
+      await expect(api.json()).resolves.toEqual({ message: 'Hello from server artifacts' });
+      const response = await serve.fetchAsync('/');
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain('Hello from server artifacts');
+      const scripts = [...html.matchAll(/<script[^>]*src="([^"]+)"/g)].map((match) => match[1]!);
+      expect(scripts.length).toBeGreaterThan(0);
+      for (const script of scripts) {
+        expect(script.endsWith('.js')).toBe(true);
+        expect((await serve.fetchAsync(script)).status).toBe(200);
+      }
+      const loader = await serve.fetchAsync('/_expo/loaders/index');
+      expect(loader.status).toBe(200);
+      await expect(loader.json()).resolves.toEqual({ message: 'Hello from server artifacts' });
+    });
+  }
+
   it('persists flat server maps with sibling references, debug IDs, and no embedded sources', () => {
     const root = path.join(outputDir, 'server');
     const files = findProjectFiles(root);
-    const bundles = files.filter((file) => file.endsWith('.js') && !file.endsWith('-manifest.js'));
+    expect(
+      files.filter((file) => packageType === 'module' && /\.js(?:\.map)?$/.test(file))
+    ).toEqual([]);
+    const bundles = files.filter(
+      (file) => file.endsWith(extension) && !file.endsWith('-manifest' + extension)
+    );
     expect(bundles.length).toBeGreaterThan(0);
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, '_expo/routes.json'), 'utf8'));
+    for (const route of [...manifest.apiRoutes, manifest.middleware, manifest.rendering]) {
+      if (route?.file) expect(files).toContain(route.file);
+    }
+    for (const route of manifest.htmlRoutes) {
+      if (route.loader) expect(files).toContain(route.loader);
+    }
+    const clientFiles = findProjectFiles(path.join(outputDir, 'client'));
+    expect(clientFiles.some((file) => file.endsWith('.js'))).toBe(true);
+    expect(clientFiles.some((file) => file.endsWith('.cjs'))).toBe(false);
     if (mode === 'RSC') {
-      expect(files).toContain('_expo/rsc/web/router.js.map');
-      expect(files.some((file) => /_expo\/rsc\/web\/actions-.*\.js\.map$/.test(file))).toBe(true);
+      expect(files).toContain(`_expo/rsc/web/router${extension}.map`);
+      for (const name of ['ssr', 'action']) {
+        expect(files).toContain(`_expo/rsc/web/${name}-manifest${extension}`);
+      }
+      const actions = createRequire(__filename)(
+        path.join(root, `_expo/rsc/web/action-manifest${extension}`)
+      );
+      expect(Object.values(actions).length).toBeGreaterThan(0);
+      for (const [, filename] of Object.values(actions) as [string, string][]) {
+        expect(files).toContain(filename);
+        expect(filename.endsWith(extension)).toBe(true);
+      }
+      expect(
+        files.some(
+          (file) => file.startsWith('_expo/rsc/web/actions-') && file.endsWith(extension + '.map')
+        )
+      ).toBe(true);
     }
     for (const filename of bundles) {
       const code = fs.readFileSync(path.join(root, filename), 'utf8');
@@ -151,6 +247,7 @@ describe.each(['SSR', 'RSC'])('serialized server artifacts: %s', (mode) => {
       mode === 'RSC' ? '/_flight/web/index.txt?platform=web' : '/'
     );
     expect(response.status).toBe(200);
+    if (mode === 'SSR') expect(response.headers.get('x-esm-middleware')).toBe('true');
     expect(await response.text()).toContain(
       mode === 'RSC' ? 'Server artifact RSC page' : 'Hello from server artifacts'
     );
@@ -158,6 +255,10 @@ describe.each(['SSR', 'RSC'])('serialized server artifacts: %s', (mode) => {
 
   it('maps deployed stack traces to virtual source names independent of the export directory', async () => {
     if (mode === 'SSR') {
+      const api = await server.fetchAsync('/hello');
+      expect(api.status).toBe(200);
+      expect(api.headers.get('x-esm-middleware')).toBe('true');
+      await expect(api.json()).resolves.toEqual({ message: 'Hello from server artifacts' });
       const response = await server.fetchAsync('/hello?error=1');
       expect(response.status).toBe(200);
       const { stack } = await response.json();
