@@ -54,6 +54,7 @@ export type SerializerParameters = [
 ];
 
 export type SerializerConfigOptions = {
+  serverOutputExtension?: '.js' | '.cjs';
   unstable_beforeAssetSerializationPlugins?: ((serializationInput: {
     graph: ReadOnlyGraph<MixedOutput>;
     premodules: Module[];
@@ -261,7 +262,12 @@ function getDefaultSerializer(
       );
     }
 
-    options.serializerOptions = { ...serializerOptions };
+    options.serializerOptions = {
+      ...serializerOptions,
+      outputExtension:
+        serializerOptions.outputExtension ??
+        (isServer ? configOptions.serverOutputExtension : undefined),
+    };
 
     const customTransformOptions = graph.transformOptions.customTransformOptions;
     const isLazyBundle = options.includeAsyncPaths;
